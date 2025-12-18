@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::pbr::wireframe::WireframePlugin;
 use chrono::{DateTime, Utc};
 use sgp4::Elements;
 
@@ -25,6 +26,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(WireframePlugin::default())
         .init_resource::<ui::SatelliteFilter>()
         .init_resource::<ui::InputFocus>()
         .add_systems(Startup, (setup_scene, load_satellites, ui::setup_ui))
@@ -125,10 +127,11 @@ fn update_satellite_positions(
     time: Res<Time>,
 ) {
     // Time acceleration factor - satellites move this many times faster than real-time
-    // Set to 60.0 means 1 minute of simulation = 1 second of real time
-    const TIME_ACCELERATION: f64 = 60.0;
+    // Set to 1.0 for real-time (no acceleration)
+    const TIME_ACCELERATION: f64 = 1.0;
     
     // Calculate accelerated time based on app start time
+    // Use fractional seconds for smooth animation
     static mut START_TIME: Option<DateTime<Utc>> = None;
     let start_time = unsafe {
         if START_TIME.is_none() {
@@ -137,9 +140,14 @@ fn update_satellite_positions(
         START_TIME.unwrap()
     };
     
+    // Use elapsed time with fractional seconds for smooth movement
     let elapsed_seconds = time.elapsed().as_secs_f64();
     let accelerated_seconds = elapsed_seconds * TIME_ACCELERATION;
-    let accelerated_time = start_time + chrono::Duration::seconds(accelerated_seconds as i64);
+    
+    // Create duration with nanosecond precision for smooth animation
+    // This ensures we don't lose precision when converting to DateTime
+    let total_nanos = (accelerated_seconds * 1_000_000_000.0) as i64;
+    let accelerated_time = start_time + chrono::Duration::nanoseconds(total_nanos);
     
     for (mut transform, mut satellite) in query.iter_mut() {
         if let Some(position) = satellite.update_position(accelerated_time) {
