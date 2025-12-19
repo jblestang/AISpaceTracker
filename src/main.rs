@@ -59,7 +59,7 @@ fn setup_scene(
     // Uniform ambient light (no day/night variation)
     commands.insert_resource(AmbientLight {
         color: Color::WHITE,
-        brightness: 1.0, // Uniform brightness
+        brightness: 0.6, // Reduced brightness for less bright day
         affects_lightmapped_meshes: false,
     });
     
@@ -68,7 +68,7 @@ fn setup_scene(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(1.0, 0.95, 0.85), // Warm sunlight color
-            illuminance: 40000.0, // Reduced for less bright day
+            illuminance: 20000.0, // Reduced for less bright day
             shadows_enabled: false, // Disable shadows for performance
             ..default()
         },
@@ -80,7 +80,7 @@ fn setup_scene(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.9, 0.85, 0.7), // Softer warm light for transition
-            illuminance: 10000.0, // Reduced for smoother transition
+            illuminance: 5000.0, // Reduced for smoother transition
             shadows_enabled: false,
             ..default()
         },
@@ -270,16 +270,18 @@ fn update_sun_position(
     // We want the light to point toward Earth, so the light direction should be -sun_direction
     // (from sun toward Earth, which is opposite of sun_direction which is from Earth toward sun)
     //
+    // However, if day/night are inverted, we need to negate the sun direction
     // Position the light far from Earth in the direction opposite to sun_direction
     // The light's transform.forward() will point toward Earth
     let sun_distance = 50000.0; // Far enough to be effectively parallel
-    let sun_position = -sun_direction * sun_distance; // Position light opposite to sun direction
+    // Negate sun_direction to fix day/night inversion
+    let sun_position = sun_direction * sun_distance; // Position light in sun direction (inverted)
     
     // Position twilight light slightly ahead of sun for gradient effect
     // Rotate sun direction slightly for twilight
     let twilight_rotation = Quat::from_axis_angle(Vec3::Y, 0.15); // ~8.6 degrees
     let twilight_direction = twilight_rotation * sun_direction;
-    let twilight_position = -twilight_direction * sun_distance;
+    let twilight_position = twilight_direction * sun_distance; // Inverted to match sun position
     
     for (mut transform, name) in light_query.iter_mut() {
         if name.as_str() == "Sun" {
