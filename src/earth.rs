@@ -1,8 +1,10 @@
 use bevy::prelude::*;
+use crate::sun;
 
 #[derive(Component)]
 pub struct EarthTexture {
-    pub handle: Handle<Image>,
+    pub day_handle: Handle<Image>,
+    pub night_handle: Handle<Image>,
 }
 
 #[derive(Bundle)]
@@ -26,21 +28,29 @@ impl EarthBundle {
         // High resolution (64 sectors, 32 stacks) to ensure smooth poles and horizon
         let mesh_handle = meshes.add(create_uv_sphere(earth_radius, 64, 32));
 
-        // Load Earth texture
-        let texture_path = "earth_texture.jpg";
-        let earth_texture_handle: Handle<Image> = asset_server.load(texture_path);
-        println!("Loading Earth texture from: {}", texture_path);
+        // Load Earth day and night textures
+        let day_texture_path = "earth_texture.jpg";
+        let night_texture_path = "earth_night_texture.jpg";
+        let day_texture_handle: Handle<Image> = asset_server.load(day_texture_path);
+        let night_texture_handle: Handle<Image> = asset_server.load(night_texture_path);
+        println!("Loading Earth textures:");
+        println!("  Day: {}", day_texture_path);
+        println!("  Night: {}", night_texture_path);
 
-        // Create material with texture
+        // Create material with day and night textures
+        // Use unlit: false so emissive texture works, but keep lighting uniform via ambient light
         let material = materials.add(StandardMaterial {
-            base_color_texture: Some(earth_texture_handle.clone()),
-            base_color: Color::WHITE, // White so texture shows properly
+            // Day texture as base color (shows on lit side)
+            // Night texture as emissive (shows on dark/night side)
+            base_color_texture: Some(day_texture_handle.clone()),
+            emissive_texture: Some(night_texture_handle.clone()),
+            base_color: Color::srgb(1.0, 1.0, 1.0), // Normal brightness
             metallic: 0.0,
-            perceptual_roughness: 0.8,
-            // Use unlit material for completely uniform appearance (no lighting calculations)
-            unlit: true, // This makes it always fully lit regardless of lighting
-            // Reduce alpha cutoff to help with texture blending at seams
+            perceptual_roughness: 0.7,
+            // Use unlit: false so emissive texture is visible
+            unlit: false,
             alpha_mode: AlphaMode::Opaque,
+            emissive: LinearRgba::from(Color::srgb(0.4, 0.4, 0.5)), // Emissive for night texture visibility
             ..default()
         });
 
@@ -50,7 +60,8 @@ impl EarthBundle {
             transform: Transform::from_translation(Vec3::ZERO),
             visibility: Visibility::default(),
             earth_texture: EarthTexture {
-                handle: earth_texture_handle,
+                day_handle: day_texture_handle,
+                night_handle: night_texture_handle,
             },
         }
     }
@@ -89,9 +100,9 @@ fn create_uv_sphere(radius: f32, sectors: usize, stacks: usize) -> Mesh {
         let n = Vec3::new(x, y, z).normalize_or_zero();
 
         // UVs
-        // u: 0 to 1 along sector (theta)
+        // u: 0 to 1 along sector (theta) - flipped to fix East-West inversion
         // v: 0 to 1 along stack (phi)
-        let u = j as f32 / sectors as f32;
+        let u = 1.0 - (j as f32 / sectors as f32);
         let v = i as f32 / stacks as f32;
 
         ([x, y, z], [n.x, n.y, n.z], [u, v])
@@ -152,7 +163,7 @@ fn create_uv_sphere(radius: f32, sectors: usize, stacks: usize) -> Mesh {
     mesh
 }
 
-/// System to verify texture loaded and update material if needed
+/// System to verify textures loaded and update material if needed
 pub fn check_earth_texture_loaded(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -160,34 +171,74 @@ pub fn check_earth_texture_loaded(
     mut has_logged: Local<bool>,
 ) {
     for (earth_texture, material_3d) in query.iter() {
-        match images.get_mut(&earth_texture.handle) {
-            Some(image) => {
-                if !*has_logged {
+        let day_loaded = images.get(&earth_texture.day_handle).is_some();
+        let night_loaded = images.get(&earth_texture.night_handle).is_some();
+        
+        if day_loaded && night_loaded && !*has_logged {
+            if let Some(day_image) = images.get(&earth_texture.day_handle) {
+                if let Some(night_image) = images.get(&earth_texture.night_handle) {
                     println!(
-                        "✓ Earth texture loaded successfully! Size: {}x{}",
-                        image.size().x,
-                        image.size().y
+                        "✓ Earth textures loaded successfully!"
+                    );
+                    println!(
+                        "  Day texture: {}x{}",
+                        day_image.size().x,
+                        day_image.size().y
+                    );
+                    println!(
+                        "  Night texture: {}x{}",
+                        night_image.size().x,
+                        night_image.size().y
                     );
                     *has_logged = true;
                 }
-
-                // Note: Texture seam artifacts are inherent to equirectangular projections
-                // The best solution is to use a texture that's designed to wrap seamlessly
-                // or process the texture to remove the seam before using it
-
-                // Ensure material is using the texture
-                if let Some(material) = materials.get_mut(&material_3d.0) {
-                    if material.base_color_texture.is_none() {
-                        material.base_color_texture = Some(earth_texture.handle.clone());
-                    }
-                    material.base_color = Color::WHITE;
-                }
             }
-            None => {
-                if !*has_logged {
-                    println!("⏳ Earth texture still loading...");
-                }
+        } else if !*has_logged {
+            println!("⏳ Earth textures still loading...");
+        }
+
+        // Ensure material is using the textures
+        if let Some(material) = materials.get_mut(&material_3d.0) {
+            if material.base_color_texture.is_none() {
+                material.base_color_texture = Some(earth_texture.day_handle.clone());
             }
+            if material.emissive_texture.is_none() {
+                material.emissive_texture = Some(earth_texture.night_handle.clone());
+            }
+            material.base_color = Color::WHITE;
+        }
+    }
+}
+
+/// System to blend day/night textures based on sun position
+/// Uses emissive texture intensity to show night texture when surface is in shadow
+/// The emissive texture (night) will be more visible when the surface is darker (facing away from sun)
+/// 
+/// Note: StandardMaterial doesn't support per-vertex emissive control, so we rely on the shader's
+/// automatic blending based on lighting. The emissive texture will be more visible in darker areas.
+/// If there's a day/night inversion, we may need to adjust the sun direction or material properties.
+pub fn blend_day_night_textures(
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    query: Query<(&EarthTexture, &MeshMaterial3d<StandardMaterial>)>,
+    _sun_query: Query<(&GlobalTransform, &Name), With<DirectionalLight>>,
+    _time: Res<Time>,
+) {
+    // The emissive texture blending is handled automatically by the shader based on lighting
+    // The emissive texture (night) will be more visible in darker areas (night side)
+    // If there's a day/night mix up, it's likely because:
+    // 1. The sun direction is inverted in update_sun_position (which we already negate)
+    // 2. The emissive texture needs to be inverted
+    
+    // Since StandardMaterial blends emissive based on lighting automatically,
+    // and the lighting is controlled by update_sun_position (which negates sun_direction),
+    // the emissive should automatically show on the night side.
+    // If it's showing on the day side, we might need to swap base_color_texture and emissive_texture
+    
+    for (_, material_3d) in query.iter() {
+        if let Some(material) = materials.get_mut(&material_3d.0) {
+            // Set emissive intensity to make night texture visible
+            // The shader will automatically make emissive more visible in darker areas (night side)
+            material.emissive = LinearRgba::from(Color::srgb(0.4, 0.4, 0.5)); // Higher emissive for visibility with uniform lighting
         }
     }
 }

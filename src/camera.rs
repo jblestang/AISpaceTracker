@@ -25,6 +25,7 @@ pub fn camera_controller_system(
     mouse_button: Res<ButtonInput<MouseButton>>,
     mut mouse_motion_events: EventReader<CursorMoved>,
     mut last_cursor_pos: Local<Option<Vec2>>,
+    time: Res<Time>,
 ) {
     for (mut transform, mut controller) in query.iter_mut() {
         // Handle mouse drag for rotation
@@ -46,12 +47,40 @@ pub fn camera_controller_system(
             *last_cursor_pos = None;
         }
 
+        // Handle arrow keys for camera rotation
+        let rotation_speed = 1.0; // radians per second
+        let delta_time = time.delta_secs();
+        
+        if keyboard_input.pressed(KeyCode::ArrowLeft) {
+            controller.yaw -= rotation_speed * delta_time;
+        }
+        if keyboard_input.pressed(KeyCode::ArrowRight) {
+            controller.yaw += rotation_speed * delta_time;
+        }
+        if keyboard_input.pressed(KeyCode::ArrowUp) {
+            controller.pitch += rotation_speed * delta_time;
+            // Clamp pitch to avoid gimbal lock
+            controller.pitch = controller.pitch.clamp(
+                -std::f32::consts::PI / 2.0 + 0.1,
+                std::f32::consts::PI / 2.0 - 0.1,
+            );
+        }
+        if keyboard_input.pressed(KeyCode::ArrowDown) {
+            controller.pitch -= rotation_speed * delta_time;
+            // Clamp pitch to avoid gimbal lock
+            controller.pitch = controller.pitch.clamp(
+                -std::f32::consts::PI / 2.0 + 0.1,
+                std::f32::consts::PI / 2.0 - 0.1,
+            );
+        }
+
         // Handle zoom with W/S keys
+        let zoom_speed = 500.0; // units per second
         if keyboard_input.pressed(KeyCode::KeyW) {
-            controller.distance = (controller.distance - 100.0).max(1000.0);
+            controller.distance = (controller.distance - zoom_speed * delta_time).max(1000.0);
         }
         if keyboard_input.pressed(KeyCode::KeyS) {
-            controller.distance = (controller.distance + 100.0).min(100000.0);
+            controller.distance = (controller.distance + zoom_speed * delta_time).min(100000.0);
         }
 
         // Update camera position based on yaw and pitch

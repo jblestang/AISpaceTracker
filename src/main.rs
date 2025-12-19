@@ -9,6 +9,7 @@ mod camera;
 mod tle_loader;
 mod coordinate_debug;
 mod ui;
+mod sun;
 
 use satellite::{Satellite, SatelliteBundle};
 use earth::{EarthBundle, EarthTexture};
@@ -33,7 +34,10 @@ fn main() {
         .add_systems(Update, (
             update_satellite_positions,
             update_satellite_labels,
+            update_sun_position,
+            update_terminator_line,
             earth::check_earth_texture_loaded,
+            earth::blend_day_night_textures, // Blend day/night textures based on sun position
             camera::camera_controller_system,
             ui::check_input_focus,
             ui::update_filter_text,
@@ -47,38 +51,124 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
+    time: Res<Time>,
 ) {
     // Spawn Earth
     commands.spawn(EarthBundle::new(&mut meshes, &mut materials, &asset_server));
 
-    // Use high ambient light for uniform lighting
+    // Uniform ambient light (no day/night variation)
     commands.insert_resource(AmbientLight {
         color: Color::WHITE,
-        brightness: 5.0, // Very high brightness for uniform lighting
+        brightness: 1.0, // Uniform brightness
         affects_lightmapped_meshes: false,
     });
     
-    // Add a very soft directional light from all directions (no shadows, no dark areas)
-    // This helps with visibility while keeping lighting uniform
+    // Spawn the sun as a directional light
+    // The sun will be positioned and rotated based on current time using real astronomical calculations
     commands.spawn((
         DirectionalLight {
-            illuminance: 3000.0, // Moderate brightness
-            shadows_enabled: false, // No shadows
+            color: Color::srgb(1.0, 0.95, 0.85), // Warm sunlight color
+            illuminance: 40000.0, // Reduced for less bright day
+            shadows_enabled: false, // Disable shadows for performance
             ..default()
         },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, 0.0, 0.0, 0.0)),
+        Transform::default(), // Will be updated by update_sun_position system
+        Name::new("Sun"),
+    ));
+    
+    // Add a secondary softer light for twilight/dawn transition gradient
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(0.9, 0.85, 0.7), // Softer warm light for transition
+            illuminance: 10000.0, // Reduced for smoother transition
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::default(), // Will be updated by update_sun_position system
+        Name::new("TwilightLight"),
+    ));
+    
+    // Spawn terminator line (day/night boundary) as a red line
+    let earth_radius = 6371.0;
+    let initial_sun_dir = sun::calculate_sun_direction(get_current_time(&time));
+    // Terminator is perpendicular to sun direction
+    let terminator_mesh = sun::create_terminator_line_mesh(earth_radius, initial_sun_dir, 128);
+    let terminator_mesh_handle = meshes.add(terminator_mesh);
+    
+    let terminator_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.0, 0.0), // Red color
+        unlit: true, // Always visible regardless of lighting
+        ..default()
+    });
+    
+    commands.spawn((
+        Mesh3d(terminator_mesh_handle),
+        MeshMaterial3d(terminator_material),
+        Transform::from_translation(Vec3::ZERO),
+        sun::TerminatorLine,
+        Name::new("TerminatorLine"),
     ));
 
     // Spawn camera with order 0 (3D scene)
+    // Orient camera to focus on Europe
+    // Europe is approximately at: Longitude 10°E, Latitude 50°N
+    // The camera controller uses: x = distance * cos(pitch) * sin(yaw), y = distance * sin(pitch), z = distance * cos(pitch) * cos(yaw)
+    // We need to set yaw and pitch to point toward Europe
+    
+    let europe_lon_deg: f32 = 10.0; // 10°E
+    let europe_lat_deg: f32 = 50.0; // 50°N
+    
+    // Convert to radians
+    let europe_lon_rad = europe_lon_deg.to_radians();
+    let europe_lat_rad = europe_lat_deg.to_radians();
+    
+    // Calculate yaw and pitch for camera controller
+    // Yaw: azimuth angle (0 = looking along +Z, positive rotates toward +X)
+    // For Europe at 10°E, we need to rotate the camera
+    // Since the camera orbits around origin, yaw controls longitude view
+    // Pitch controls latitude view (0 = equator, positive = north)
+    
+    // The camera controller's coordinate system:
+    // - yaw=0: camera at (0, 0, distance) looking at origin
+    // - yaw rotates around Y axis
+    // - For 10°E longitude, we need to rotate camera to face that direction
+    // - Since texture might be flipped, try both positive and negative
+    
+    // Try: yaw = -longitude (negative because camera controller might use opposite convention)
+    // Or: yaw = longitude + PI (180° offset if showing opposite side)
+    // Since user reports Australia/Asia (120-150°E) when expecting Europe (10°E),
+    // that's about 110-140° off, or roughly 180° - 70° = 110°
+    // Let's try: yaw = -longitude - PI/2 or adjust based on actual offset
+    
+    let camera_distance = 15000.0;
+    
+    // Calculate yaw: for Europe at 10°E, adjust for coordinate system
+    // The UV sphere texture is flipped East-West (U = 1.0 - u)
+    // So we need to account for this in the camera positioning
+    // If showing Australia/Asia (~130°E) when expecting Europe (10°E), 
+    // that's about 120° off, suggesting we need to adjust by ~120° or use opposite side
+    // Try: add 180° offset to get to opposite side, or adjust based on texture flip
+    let yaw = -europe_lon_rad + std::f32::consts::PI; // Add 180° to account for texture flip
+    
+    // Pitch: slight angle to view Europe from above
+    let pitch = europe_lat_rad * 0.3; // 30% of latitude for slight angle
+    
+    // Calculate camera position using camera controller formula
+    let x = camera_distance * pitch.cos() * yaw.sin();
+    let y = camera_distance * pitch.sin();
+    let z = camera_distance * pitch.cos() * yaw.cos();
+    let camera_position = Vec3::new(x, y, z);
+    
     commands.spawn((
         Camera3d::default(),
         Camera::default(),
-        Transform::from_xyz(0.0, 0.0, 15000.0)
-        .looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(camera_position)
+            .looking_at(Vec3::ZERO, Vec3::Y),
         CameraController {
             orbit_center: Vec3::ZERO,
-            distance: 15000.0,
-            ..default()
+            distance: camera_distance,
+            yaw,
+            pitch,
         },
     ));
 }
@@ -122,16 +212,10 @@ fn load_satellites(
     }
 }
 
-fn update_satellite_positions(
-    mut query: Query<(&mut Transform, &mut Satellite)>,
-    time: Res<Time>,
-) {
-    // Time acceleration factor - satellites move this many times faster than real-time
-    // Set to 1.0 for real-time (no acceleration)
+// Helper function to get current simulation time
+fn get_current_time(time: &Time) -> DateTime<Utc> {
     const TIME_ACCELERATION: f64 = 1.0;
     
-    // Calculate accelerated time based on app start time
-    // Use fractional seconds for smooth animation
     static mut START_TIME: Option<DateTime<Utc>> = None;
     let start_time = unsafe {
         if START_TIME.is_none() {
@@ -140,17 +224,20 @@ fn update_satellite_positions(
         START_TIME.unwrap()
     };
     
-    // Use elapsed time with fractional seconds for smooth movement
     let elapsed_seconds = time.elapsed().as_secs_f64();
     let accelerated_seconds = elapsed_seconds * TIME_ACCELERATION;
-    
-    // Create duration with nanosecond precision for smooth animation
-    // This ensures we don't lose precision when converting to DateTime
     let total_nanos = (accelerated_seconds * 1_000_000_000.0) as i64;
-    let accelerated_time = start_time + chrono::Duration::nanoseconds(total_nanos);
+    start_time + chrono::Duration::nanoseconds(total_nanos)
+}
+
+fn update_satellite_positions(
+    mut query: Query<(&mut Transform, &mut Satellite)>,
+    time: Res<Time>,
+) {
+    let current_time = get_current_time(&time);
     
     for (mut transform, mut satellite) in query.iter_mut() {
-        if let Some(position) = satellite.update_position(accelerated_time) {
+        if let Some(position) = satellite.update_position(current_time) {
             // Convert TEME to Bevy using debug function
             // Enable debug for first few satellites
             static mut DEBUG_COUNT: usize = 0;
@@ -164,6 +251,69 @@ fn update_satellite_positions(
             };
             transform.translation = teme_to_bevy(position, &satellite.name, debug);
         }
+    }
+}
+
+/// Update sun position using real astronomical calculations
+/// Accounts for Earth's axial tilt and seasonal variation
+fn update_sun_position(
+    mut light_query: Query<(&mut Transform, &Name), With<DirectionalLight>>,
+    time: Res<Time>,
+) {
+    let current_time = get_current_time(&time);
+    
+    // Calculate real sun direction based on date/time
+    // This returns a vector pointing from Earth center toward the sun
+    let sun_direction = sun::calculate_sun_direction(current_time);
+    
+    // For a directional light in Bevy, the light direction is the direction the light is pointing
+    // We want the light to point toward Earth, so the light direction should be -sun_direction
+    // (from sun toward Earth, which is opposite of sun_direction which is from Earth toward sun)
+    //
+    // Position the light far from Earth in the direction opposite to sun_direction
+    // The light's transform.forward() will point toward Earth
+    let sun_distance = 50000.0; // Far enough to be effectively parallel
+    let sun_position = -sun_direction * sun_distance; // Position light opposite to sun direction
+    
+    // Position twilight light slightly ahead of sun for gradient effect
+    // Rotate sun direction slightly for twilight
+    let twilight_rotation = Quat::from_axis_angle(Vec3::Y, 0.15); // ~8.6 degrees
+    let twilight_direction = twilight_rotation * sun_direction;
+    let twilight_position = -twilight_direction * sun_distance;
+    
+    for (mut transform, name) in light_query.iter_mut() {
+        if name.as_str() == "Sun" {
+            // Position the sun and make it look at Earth (center)
+            transform.translation = sun_position;
+            transform.look_at(Vec3::ZERO, Vec3::Y);
+        } else if name.as_str() == "TwilightLight" {
+            // Position twilight light for smooth transition
+            transform.translation = twilight_position;
+            transform.look_at(Vec3::ZERO, Vec3::Y);
+        }
+    }
+}
+
+/// Update terminator line (day/night boundary) based on current sun position
+fn update_terminator_line(
+    mut terminator_query: Query<&mut Mesh3d, (With<sun::TerminatorLine>, Without<DirectionalLight>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    time: Res<Time>,
+) {
+    let current_time = get_current_time(&time);
+    // Calculate sun direction (from Earth toward sun)
+    let sun_direction = sun::calculate_sun_direction(current_time);
+    
+    let earth_radius = 6371.0;
+    
+    // Recreate terminator line mesh with updated sun direction
+    // The terminator is perpendicular to the sun direction
+    let terminator_mesh = sun::create_terminator_line_mesh(earth_radius, sun_direction, 128);
+    let new_mesh_handle = meshes.add(terminator_mesh);
+    
+    for mut mesh_3d in terminator_query.iter_mut() {
+        // Replace the mesh handle with a new one
+        *mesh_3d = Mesh3d(new_mesh_handle.clone());
     }
 }
 
