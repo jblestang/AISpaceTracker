@@ -32,29 +32,48 @@ pub fn calculate_sun_direction(current_time: DateTime<Utc>) -> Vec3 {
     let second = current_time.second() as f64;
     let hours_since_midnight = hour + minute / 60.0 + second / 3600.0;
     let hours_since_solar_noon = hours_since_midnight - 12.0; // Solar noon is at 12:00
-    let hour_angle = (hours_since_solar_noon * 15.0).to_radians(); // 15 degrees per hour
+    let hour_angle_deg = hours_since_solar_noon * 15.0; // 15 degrees per hour
+    let hour_angle = hour_angle_deg.to_radians();
     
-    // Convert to 3D direction vector using spherical coordinates
-    // The sun's position on the celestial sphere:
-    // - Declination (latitude): angle from equator, positive = north, negative = south
-    // - Hour angle (longitude): angle from solar noon, positive = west, negative = east
+    // Convert hour angle to longitude
+    // Hour angle is 0 at solar noon (longitude 0° at 12:00 UTC)
+    // Positive hour angle = west (later in day) = negative longitude
+    // Negative hour angle = east (earlier in day) = positive longitude
+    // So longitude = -hour_angle_deg
+    let longitude_deg = -hour_angle_deg; // Convert hour angle to longitude
+    let longitude = longitude_deg.to_radians();
+    
+    // Convert to 3D direction vector matching the Earth mesh coordinate system
+    // The Earth mesh uses:
+    // - x = r * sin(phi) * cos(theta)  where theta is longitude (0 to 2π)
+    // - y = r * cos(phi)               where phi is colatitude (0 at north pole, π at south pole)
+    // - z = r * sin(phi) * sin(theta)
     //
-    // In Bevy's coordinate system:
-    // - X: East (positive) / West (negative)
-    // - Y: Up (North, positive) / Down (South, negative)
-    // - Z: Forward/Back
+    // For the sun direction (pointing from Earth center toward sun):
+    // - Declination maps to latitude: latitude = declination
+    // - Longitude maps to theta in the Earth coordinate system
+    // - But we need to account for the UV flip: u = 1.0 - (j / sectors)
+    //   This means theta=0 in mesh corresponds to u=1.0 in texture (left side, 180°W or -180°)
+    //   And theta=2π corresponds to u=0.0 in texture (right side, 180°E or +180°)
     //
-    // For a point on a sphere:
-    // - x = r * cos(declination) * sin(hour_angle)  [East/West]
-    // - y = r * sin(declination)                      [North/South]
-    // - z = r * cos(declination) * cos(hour_angle)   [Forward/Back]
-    //
-    // The sun direction points from Earth center toward the sun
-    // At solar noon (hour_angle = 0), sun is at longitude 0° (Greenwich)
-    // Positive hour angle means sun is west (later in the day)
-    let x = declination.cos() * hour_angle.sin();
-    let y = declination.sin();
-    let z = declination.cos() * hour_angle.cos();
+    // To match the texture: if longitude is 0° (Greenwich), it should be at u=0.5 (middle of texture)
+    // In the mesh: theta = 0 corresponds to u=1.0, theta = π corresponds to u=0.5, theta = 2π corresponds to u=0.0
+    // So: theta = π - longitude (in radians)
+    
+    let latitude = declination; // Declination is the latitude of the sun
+    let colatitude = std::f64::consts::PI / 2.0 - latitude; // Convert latitude to colatitude (0 at north pole)
+    
+    // Map longitude to theta accounting for UV flip
+    // Longitude 0° (Greenwich) should be at theta = π (middle of texture)
+    // Longitude +180° should be at theta = 0 (left edge, u=1.0)
+    // Longitude -180° should be at theta = 2π (right edge, u=0.0)
+    // Formula: theta = π - longitude
+    let theta = std::f64::consts::PI - longitude;
+    
+    // Now convert to Bevy coordinates matching the Earth mesh
+    let x = colatitude.sin() * theta.cos();
+    let y = colatitude.cos(); // Y-up, so north pole (colatitude=0) is at y=1
+    let z = colatitude.sin() * theta.sin();
     
     Vec3::new(x as f32, y as f32, z as f32).normalize()
 }

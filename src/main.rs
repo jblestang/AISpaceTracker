@@ -42,6 +42,7 @@ fn main() {
             ui::check_input_focus,
             ui::update_filter_text,
             ui::filter_satellites,
+            toggle_fullscreen, // Toggle fullscreen mode
         ))
         .run();
 }
@@ -445,6 +446,27 @@ fn update_satellite_labels(
                 // Point is not visible, hide label
                 *visibility = Visibility::Hidden;
             }
+        }
+    }
+}
+
+/// Toggle fullscreen mode with F11 or Alt+Enter
+fn toggle_fullscreen(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut windows: Query<&mut Window>,
+) {
+    // Check for F11 or Alt+Enter
+    let toggle_f11 = keyboard_input.just_pressed(KeyCode::F11);
+    let toggle_alt_enter = (keyboard_input.pressed(KeyCode::AltLeft) || keyboard_input.pressed(KeyCode::AltRight))
+        && keyboard_input.just_pressed(KeyCode::Enter);
+    
+    if toggle_f11 || toggle_alt_enter {
+        for mut window in windows.iter_mut() {
+            use bevy::window::{WindowMode, MonitorSelection, VideoModeSelection};
+            window.mode = match window.mode {
+                WindowMode::Windowed => WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current),
+                _ => WindowMode::Windowed,
+            };
         }
     }
 }
